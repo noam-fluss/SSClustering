@@ -73,13 +73,14 @@ class DynamicDataset(object):
 class Cifar10Dataset(CIFAR10, DynamicDataset):
 
     def __init__(self, root, indices=None, with_nat=True, nat_std=0.05, alpha=1, train=True, transform=None,
-                 download=False):
+                 download=False, n_classes=10):
         CIFAR10.__init__(self, root=root, train=train, download=download)
         self.indices = indices
+        self.n_classes = n_classes
         DynamicDataset.__init__(self, with_nat=with_nat, nat_std=nat_std, alpha=alpha, transform=transform)
 
     def get_num_classes(self):
-        return 10
+        return self.n_classes
 
     def get_num_channels(self):
         return 3

@@ -32,6 +32,8 @@ class BasicParser:
     def __init__(self):
         self.parser = argparse.ArgumentParser()
 
+
+
     def parse(self):
         opts = self.parser.parse_args()
         args = vars(opts)
@@ -225,6 +227,15 @@ class TrainingOptions(BasicParser):
         self.parser.add_argument('--labeled_transform', type=str, choices=LABELED_TRANSFORMS,
                                  help='type of labeled transform. The default if not specified is like in FixMatch')
 
+        # noam
+        self.parser.add_argument('--missing_labels', default=[], type=str, nargs='+', action=epochs_func,
+                                 help='labels we don\'t have labels in the dataset')
+
+        self.parser.add_argument('--saving_dir_killable', type=str,
+                                 help='path save the checkpoints for killable (default: None)')
+
+        self.parser.add_argument('--slurm_task_id', type=str, required=False, default=0)
+        self.parser.add_argument('--n_classes', type=int, required=False, default=0)
 
 class EvaluationOptions(BasicParser):
     def __init__(self):
@@ -310,4 +321,3 @@ class MultiEvaluationOptions(EvaluationOptions, CompareModelsOptions):
         self.parser.add_argument('--end_iter', default=False, action='store_true',
                                  help='whether to evaluate the model after the end of training or the one'
                                       'with the lowest loss.')
-
