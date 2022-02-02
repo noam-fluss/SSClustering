@@ -24,10 +24,11 @@ def create_partially_labeled_dataset(name, root, n_labels, alpha=1, transductive
                               nat_std=nat_std, **kwargs)
 
 
-def fixmatch_partition(labels, n_labels, n_classes, seed, svhn):
+def fixmatch_partition(labels, n_labels, n_classes, seed, svhn, missing_labels):
     '''
     This function is taken from FixMatch in order to use the exact same partitions for labeled and unlabeled data.
     '''
+
     np.random.seed(seed)
     class_indices = {}
     if svhn:  # hack because in fixmatch the labels are shifted: 0 -> 1, 1 -> 2, ..., 9 -> 0
@@ -40,7 +41,9 @@ def fixmatch_partition(labels, n_labels, n_classes, seed, svhn):
         class_indices[i] = cur_indices
     train_stats = np.array([len(class_indices[i]) for i in range(n_classes)], np.float64)
     train_stats /= train_stats.max()
-
+    #do not choose missing_labels
+    for label in missing_labels:
+        train_stats[label] = -1
     npos = np.zeros(n_classes, np.int64)
     labeled_indices = []
     for i in range(n_labels):
@@ -48,13 +51,15 @@ def fixmatch_partition(labels, n_labels, n_classes, seed, svhn):
         labeled_indices.append(class_indices[c][npos[c]])
         npos[c] += 1
     labeled_indices = sorted(labeled_indices)  # for having the same order as fixmatch - easy comparison.
+
+    # labeled_indices = labeled_indicesnp.array(labeled_indices)[labels[labeled_indices] != 9].tolist()
     return labeled_indices, seed
 
 
-def partition_dataset(labels, n_labels, n_classes, seeds=None, svhn=False):
+def partition_dataset(labels, n_labels, n_classes, missing_labels, seeds=None, svhn=False):
     labels = np.array(labels)
     if isinstance(seeds, int):  # we want exact FixMatch partition.
-        return fixmatch_partition(labels, n_labels, n_classes, seeds, svhn)
+        return fixmatch_partition(labels, n_labels, n_classes, seeds, svhn, missing_labels)
     labels_per_class = n_labels // n_classes
     remaining_labels = n_labels % n_classes
     labeled_indices = []
@@ -77,7 +82,7 @@ def partition_dataset(labels, n_labels, n_classes, seeds=None, svhn=False):
     return labeled_indices, new_seeds
 
 
-def load_cifar10(root, n_labels, transductive, nat_std, alpha, seeds=None, **kwargs):
+def load_cifar10(root, n_labels, transductive, nat_std, alpha, missing_labels, n_classes, seeds=None, **kwargs):
     kwargs['out_size'] = 32
     mean = cifar10_mean if kwargs['normalize_data'] else None
     std = cifar10_std if kwargs['normalize_data'] else None
@@ -85,10 +90,13 @@ def load_cifar10(root, n_labels, transductive, nat_std, alpha, seeds=None, **kwa
                                                             unlabeled_name=kwargs['unlabeled_transform'],
                                                             mean=mean, std=std, **kwargs)
     base_dataset = CIFAR10(root, train=True, download=True)
-    labeled_indices, seeds = partition_dataset(labels=base_dataset.targets, n_labels=n_labels, n_classes=10,
-                                               seeds=seeds)
+    if n_classes == 0:
+        n_classes = 10
+    labeled_indices, seeds = partition_dataset(labels=base_dataset.targets, n_labels=n_labels, n_classes=n_classes,
+                                               seeds=seeds, missing_labels=missing_labels)
     labeled_trainset = Cifar10Dataset(root=root, indices=labeled_indices, with_nat=False, train=True,
                                       transform=labeled_transform)
+
     unlabeled_trainset = Cifar10Dataset(root=root, nat_std=nat_std, train=True, alpha=alpha,
                                         transform=unlabeled_transform)
     validation_set = Cifar10Dataset(root=root, train=False, transform=labeled_transform,

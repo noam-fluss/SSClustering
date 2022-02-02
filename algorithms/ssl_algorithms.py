@@ -186,14 +186,13 @@ class CTAFixMatch(FixMatch):
         labels_perm_inverse = np.where(self.labels_permutation == np.arange(self.num_classes)[:, None])[1]
 
         train_loader = zip(labeled_train_loader, unlabeled_train_loader)
-
         l_loss = torch.tensor(0.0, device=self.device)
         ul_loss = torch.tensor(0.0, device=self.device)
+
         confident_samples_ratio = torch.tensor(0.0, device=self.device)
         pseudo_acc = torch.tensor(0.0, device=self.device)
         rotnet_loss = 0.0
         rotnet_acc = 0.0
-
         batch_mean_time = 0.0
         for i, (labeled_data, unlabeled_data) in enumerate(train_loader):
             if rotnet:

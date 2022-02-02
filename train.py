@@ -14,9 +14,10 @@ import numpy as np
 from collections import defaultdict
 import torch
 import matplotlib
+
 matplotlib.use('pdf')
 import matplotlib.pyplot as plt
-
+import wandb
 
 FLUSH_STEP = 20
 TEACHER_PATH = 'teacher-temp'
@@ -25,10 +26,21 @@ NO_ESTIMATE_ITERS = 20
 
 class SSClusteringRunner:
     def __init__(self, args):
+
         self.args = args
+        self.args.state = None
+        self.state_checkpoint_run_path = os.path.join(str(self.args.saving_dir_killable), "run",
+                                                      "task" + str(self.args.slurm_task_id),
+                                                      self.args.data_seeds + ".pkl")
+        print("self.state_checkpoint_run_path", self.state_checkpoint_run_path)
+        if os.path.exists(self.state_checkpoint_run_path):
+            self.args.state = torch.load(self.state_checkpoint_run_path)
+            self.load_state_args()
+
         if self.args.lab_gpu is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = self.args.lab_gpu
         self.ss_clust = self.get_ss_clust()
+
         if self.args.teacher_path is not None:  # change the labeled trainset to be the teacher set + the
             # K most confident pseudo labels of the teacher from each class. Not really used anymore.
             labeled_images, pseudo_labels = self.pseudo_label()
@@ -37,19 +49,35 @@ class SSClusteringRunner:
         self.log_file = self.ss_clust.log_file
         self.s_epochs = 0
         self.us_epochs = 0
-        self.other_us_stats = defaultdict(list)
-        self.other_s_stats = defaultdict(list)
+        self.other_us_stats = defaultdict(list)  # not used (noam)
+        self.other_s_stats = defaultdict(list)  # not used (noam)
         self.classification_accs = []
         self.nmi_scores = []
         self.clustering_accs = []
         self.rotnet_losses = []
         self.rotnet_accs = []
+        # TODO checkpoint
+        if self.args.state is not None:
+            self.load_train_members()
+
         self.graphs_dir = os.path.join(self.ss_clust.cur_dir, 'graphs')
         self.stats_dir = os.path.join(self.ss_clust.cur_dir, 'stats')
         if not os.path.exists(self.graphs_dir):
             os.mkdir(self.graphs_dir)
         if not os.path.exists(self.stats_dir):
             os.mkdir(self.stats_dir)
+
+    def load_state_args(self):
+        self.args = self.args.state["args"]
+
+    def load_train_members(self):
+        self.s_epochs = self.args.state["train_members"]["s_epochs"]
+        self.us_epochs = self.args.state["train_members"]["us_epochs"]
+        self.classification_accs = self.args.state["train_members"]["classification_accs"]
+        self.nmi_scores = self.args.state["train_members"]["nmi_scores"]
+        self.clustering_accs = self.args.state["train_members"]["clustering_accs"]
+        self.rotnet_losses = self.args.state["train_members"]["rotnet_losses"]
+        self.rotnet_accs = self.args.state["train_members"]["rotnet_accs"]
 
     def pseudo_label(self):
         teacher_ckpt = torch.load(self.args.teacher_path, map_location='cpu')
@@ -78,15 +106,23 @@ class SSClusteringRunner:
         return Dummy(args=e_dict(vars(self.args)))
 
     def train(self):
-        if self.args.rotnet_start_epochs > 0:  # rotnet warmup epochs.
-            for i in range(1, self.args.rotnet_start_epochs + 1):
-                loss, acc = self.ss_clust.rotnet_epoch(optim=self.ss_clust.us_optim)
-                self.save_rotnet_stats(loss=loss, acc=acc, epoch=i, iteration=0,
-                                       save_graphs=i == self.args.rotnet_start_epochs)
+        print("self.args.iterations", self.args.iterations)
+        if self.args.state is not None and not self.args.state["finished_rotnet"]:
+            if self.args.rotnet_start_epochs > 0:  # rotnet warmup epochs.
+                print("self.args.rotnet_start_epochs + 1", self.args.rotnet_start_epochs + 1)
+                for i in range(1, self.args.rotnet_start_epochs + 1):
+                    loss, acc = self.ss_clust.rotnet_epoch(optim=self.ss_clust.us_optim)
+                    wandb.log({"rotnet_epoch loss": loss})
+                    wandb.log({"rotnet_epoch acc": acc})
+                    self.save_rotnet_stats(loss=loss, acc=acc, epoch=i, iteration=0,
+                                           save_graphs=i == self.args.rotnet_start_epochs)
+        print("finished rotnet_start_epochs")
+        # self.save_state_checkpoint(False)
         if self.args.freeze > 0 and self.args.frozen_lr == 0:  # can be used for fine-tuning
             self.ss_clust.freeze_layers()
         initial_iteration = self.ss_clust.initial_iteration
         for i, iteration in enumerate(range(initial_iteration, initial_iteration + self.args.iterations)):
+
             if self.args.s_epochs[0] == 0 and i == 1 and self.args.estimate_perm:
                 # used when we start by clustering, and afterwards want to estimate the permutation and train with
                 # semi-supervised algorithms.
@@ -96,7 +132,55 @@ class SSClusteringRunner:
             self.log_file.write('start iteration number {}\n'.format(iteration + 1))
             last_iteration = iteration == initial_iteration + self.args.iterations - 1
             self.train_iteration(iteration=iteration, last_iteration=last_iteration)
+            print("self.args.missing_labels", self.args.missing_labels, type(self.args.missing_labels))
+            if self.missing_labels is not None and len(self.missing_labels) > 0:
+                acc_score, validation_accuracy_missing_lables, validation_accuracy_appearing_lables,missing_labels_pred_count = self.ss_clust.eval_classifier(
+                    missing_labels=self.args.missing_labels)
+                wandb.log({"iteration validation accuracy missing lables": validation_accuracy_missing_lables})
+                wandb.log({"iteration validation accuracy appearing lables": validation_accuracy_appearing_lables})
+                wandb.log({"iteration missing labels pred count lables": missing_labels_pred_count})
+            else:
+                acc_score = self.ss_clust.eval_classifier()
+            wandb.log({"iteration validation accuracy": acc_score})
+
+            # self.save_state_checkpoint(True,iteration)
         self.log_file.close()
+        print("final acc_score", acc_score)
+        print("best_classifying_acc", self.ss_clust.best_classifying_acc)
+        # self.finish_checkpoint()
+
+    def save_state_checkpoint(self, finished_rotnet, iteration=0):
+
+        train_members = {
+            "s_epochs": self.s_epochs,
+            "us_epochs": self.us_epochs,
+            "classification_accs": self.classification_accs,
+            "nmi_scores": self.nmi_scores,
+            "clustering_accs": self.clustering_accs,
+            "rotnet_losses": self.rotnet_losses,
+            "rotnet_accs": self.rotnet_accs
+        }
+        ss_clustering_members = {
+            "initial_iteration": iteration,
+            "data_seeds": self.ss_clust.data_seeds,
+            "labels_permutation": self.ss_clust.labels_permutation,
+            "best_classifying_acc": self.ss_clust.best_classifying_acc,
+            "best_clustering_acc": self.ss_clust.best_clustering_acc,
+            "us_lowest_loss": self.ss_clust.us_lowest_loss,
+            "s_lowest_loss": self.ss_clust.s_lowest_loss,
+            "cur_dir": self.ss_clust.cur_dir
+        }
+        state = {
+            "finished_rotnet": finished_rotnet,
+            "args": args,
+            "train_members": train_members,
+            "ss_clustering_members": ss_clustering_members
+        }
+        torch.save(state, self.state_checkpoint_run_path)
+
+    def finish_checkpoint(self):
+        if os.path.exists(self.state_checkpoint_run_path):
+            os.remove(self.state_checkpoint_run_path)
 
     def train_iteration(self, iteration, last_iteration=False):
         if self.s_epochs > 0 and not self.args.us_first:
@@ -107,7 +191,7 @@ class SSClusteringRunner:
             cur_iteration = iteration - self.ss_clust.initial_iteration + 1
             #  in the last 'NO_ESTIMATE_ITERS', don't estimate permutation.
             estimate_iteration = cur_iteration % self.args.estimate_freq == 0 and \
-                self.args.iterations - cur_iteration > NO_ESTIMATE_ITERS
+                                 self.args.iterations - cur_iteration > NO_ESTIMATE_ITERS
             # if 'estimate_perm' is on, we re-estimate the permutation every 'estimate_freq' iterations.
             if estimate_iteration and self.s_epochs > 0 and self.args.estimate_perm:
                 self.ss_clust.estimate_labels_permutation()
@@ -153,6 +237,9 @@ class SSClusteringRunner:
         start = time.time()
         classification_acc = self.ss_clust.eval_classifier()
         other_stats['train_acc'] = self.ss_clust.eval_train()
+
+        wandb.log({"labeled trainset classification accuracy": other_stats['train_acc']})
+        wandb.log({"supervised epoch validation accuracy": classification_acc})
         print("evaluation took {} seconds".format(time.time() - start))
         self.save_supervised_stats(acc=classification_acc, other_stats=other_stats, epoch=epoch,
                                    iteration=iteration + 1, save_graphs=save_graphs)
@@ -177,11 +264,12 @@ class SSClusteringRunner:
                                                                           rotnet=self.args.us_rotnet_batch)
             print("unsupervised epoch took {} seconds".format(time.time() - start))
             if args.unsupervised_eval == 'unlabeled':
+                print("eval_clustering, not eval_classifier")
                 nmi_score, acc_score = self.ss_clust.eval_clustering()
             else:
                 nmi_score = 0
                 acc_score = self.ss_clust.eval_classifier(no_ema=True)
-
+            wandb.log({"unsupervised epoch validation accuracy": acc_score})
             self.save_clustering_stats(nmi_score=nmi_score, acc_score=acc_score, epoch=epoch, iteration=iteration + 1,
                                        other_stats=other_stats, save_graphs=save_graphs)
             if self.args.us_rotnet_batch:
@@ -230,8 +318,3 @@ class SSClusteringRunner:
         plt.title(name)
         plt.savefig(os.path.join(self.graphs_dir, '{}.png'.format(name)))
         plt.close()
-
-
-if __name__ == '__main__':
-    args = TrainingOptions().parse()
-    SSClusteringRunner(args).train()

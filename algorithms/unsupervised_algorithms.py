@@ -8,6 +8,7 @@ from transforms import MODES
 from utils.contrastive_loss import NTXentLoss
 from sklearn.metrics import euclidean_distances
 import lap
+import wandb
 
 
 class DeepClustering(SemiSupervisedClustering):
@@ -15,6 +16,7 @@ class DeepClustering(SemiSupervisedClustering):
     Our deep clustering algorithm which is explained thoroughly in the paper. This is the main unsupervised module we
     experimented with, and all the results in the paper are achieved with this module.
     """
+
     def __init__(self, args):
         super().__init__(args)
 
@@ -33,6 +35,10 @@ class DeepClustering(SemiSupervisedClustering):
         rotnet_loss = 0.0
         rotnet_accuracy = 0.0
         num_switches = 0
+        num_switches_from_missing = 0
+        count_sum_targets_missing_label = 0
+        count_sum_new_targets_missing_label = 0
+        current_targets_missing_label = 0
         # Stream Training dataset with NAT
         for idx, images, label, nat in data_loader:
             if rotnet:
@@ -46,11 +52,20 @@ class DeepClustering(SemiSupervisedClustering):
 
             targets = nat.numpy()
             x = x.to(self.device)
+            if len(self.args.missing_labels) > 0:
+                current_targets_missing_label = targets[:, self.args.missing_labels[0]].sum()
+                count_sum_targets_missing_label += current_targets_missing_label
+            wandb.log({"unsupervised current targets missing label": current_targets_missing_label})
             augmented = torch.cat(augmented, dim=0).to(self.device)
-            cur_clustering_loss, batch_switches = self.clustering_batch(x=x, augmented=augmented, targets=targets,
-                                                                        indices=idx)
+            cur_clustering_loss, batch_switches, batch_switches_from_missing, current_new_targets_missing_label = self.clustering_batch(
+                x=x, augmented=augmented, targets=targets, indices=idx)
+            count_sum_new_targets_missing_label += current_new_targets_missing_label
             num_switches += batch_switches
+            num_switches_from_missing += batch_switches_from_missing
             clustering_loss += cur_clustering_loss
+        wandb.log({"unsupervised batch targets missing label": count_sum_targets_missing_label})
+        wandb.log({"unsupervised batch new targets missing label": count_sum_new_targets_missing_label})
+        wandb.log({"unsupervised batch switch from missing labels": num_switches_from_missing})
 
         if self.us_scheduler is not None:
             self.us_scheduler.step()
@@ -65,10 +80,17 @@ class DeepClustering(SemiSupervisedClustering):
             self.us_lowest_loss = clustering_loss
             self.save_state(iteration=iteration, phase='us')
         self.save_state(iteration=iteration, phase='end_us')
+        if len(self.args.missing_labels) > 0:
+            unsupervised_batch_nat_missing_label = self.unlabeled_trainset.nat[:, self.args.missing_labels[0]].sum()
+        else:
+            unsupervised_batch_nat_missing_label = 0
+        wandb.log({"unsupervised batch nat missing label": unsupervised_batch_nat_missing_label})
         return rotnet_loss, rotnet_accuracy, us_stats
 
     def clustering_batch(self, x, augmented, targets, indices):
         n_switches = 0
+        n_switches_from_missing = 0
+        current_new_targets_missing_label = 0
         with torch.no_grad():
             if self.args.us_ema_teacher:
                 output = F.normalize(self.us_ema.ema(x), dim=1, p=2)
@@ -94,8 +116,15 @@ class DeepClustering(SemiSupervisedClustering):
             # target or new target are non-targets (zeros). Used to calculate the switches.
             target_switch = np.argmax(new_targets[i]) != np.argmax(targets[i])  # whether there was a cluster switch.
             n_switches += int(no_real_target or target_switch)
+            if int(target_switch) and (np.argmax(new_targets[i]) not in self.args.missing_labels) and (np.argmax(
+                    targets[i]) in self.args.missing_labels):
+                n_switches_from_missing += 1
 
         self.unlabeled_trainset.update_targets(indices, new_targets)  # update the assignment to targets.
+        if len(self.args.missing_labels) > 0:
+            current_new_targets_missing_label = new_targets[:, self.args.missing_labels[0]].sum()
+        wandb.log({"unsupervised new targets missing label": current_new_targets_missing_label})
+
         one_hot_pseudo_labels = np.eye(self.num_classes)[np.argmax(output, axis=1)]
         confidence = np.linalg.norm(output - one_hot_pseudo_labels, axis=1)
         new_augmented, y = [], []
@@ -106,7 +135,6 @@ class DeepClustering(SemiSupervisedClustering):
                 t = one_hot_pseudo_labels[i]
             else:  # the sample has no target and is not confident and hence is not processed.
                 continue
-
             for j in range(self.args.r):  # include the r repetitions of the processed images.
                 new_augmented.append(augmented[j * len(x) + i])
                 y.append(t)
@@ -120,7 +148,9 @@ class DeepClustering(SemiSupervisedClustering):
         self.us_optim.step()
         if self.us_ema is not None:
             self.us_ema.update_params()
-        return loss.detach().item() * len(augmented), n_switches
+
+        return loss.detach().item() * len(
+            augmented), n_switches, n_switches_from_missing, current_new_targets_missing_label
 
 
 class USFixMatch(SemiSupervisedClustering):
