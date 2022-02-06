@@ -133,11 +133,12 @@ class SSClusteringRunner:
             last_iteration = iteration == initial_iteration + self.args.iterations - 1
             self.train_iteration(iteration=iteration, last_iteration=last_iteration)
             print("self.args.missing_labels", self.args.missing_labels, type(self.args.missing_labels))
-            if self.missing_labels is not None and len(self.missing_labels) > 0:
+            if self.args.missing_labels is not None and len(self.args.missing_labels) > 0:
                 acc_score, validation_accuracy_missing_lables, validation_accuracy_appearing_lables,missing_labels_pred_count = self.ss_clust.eval_classifier(
                     missing_labels=self.args.missing_labels)
                 wandb.log({"iteration validation accuracy missing lables": validation_accuracy_missing_lables})
                 wandb.log({"iteration validation accuracy appearing lables": validation_accuracy_appearing_lables})
+                print("missing_labels_pred_count",missing_labels_pred_count)
                 wandb.log({"iteration missing labels pred count lables": missing_labels_pred_count})
             else:
                 acc_score = self.ss_clust.eval_classifier()
@@ -172,7 +173,7 @@ class SSClusteringRunner:
         }
         state = {
             "finished_rotnet": finished_rotnet,
-            "args": args,
+            "args": self.args,
             "train_members": train_members,
             "ss_clustering_members": ss_clustering_members
         }
@@ -183,6 +184,7 @@ class SSClusteringRunner:
             os.remove(self.state_checkpoint_run_path)
 
     def train_iteration(self, iteration, last_iteration=False):
+        print("self.args.us_first",self.args.us_first)
         if self.s_epochs > 0 and not self.args.us_first:
             self.supervised_phase(iteration)
         if self.us_epochs > 0:
@@ -263,7 +265,7 @@ class SSClusteringRunner:
             rotnet_loss, rotnet_acc, other_stats = self.ss_clust.us_epoch(iteration, epoch,
                                                                           rotnet=self.args.us_rotnet_batch)
             print("unsupervised epoch took {} seconds".format(time.time() - start))
-            if args.unsupervised_eval == 'unlabeled':
+            if self.args.unsupervised_eval == 'unlabeled':
                 print("eval_clustering, not eval_classifier")
                 nmi_score, acc_score = self.ss_clust.eval_clustering()
             else:

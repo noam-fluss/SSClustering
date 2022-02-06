@@ -12,9 +12,11 @@ def set_args_by_seed(args):
 
 
 if __name__ == '__main__':
+    print("start")
     args = TrainingOptions().parse()
     config = vars(args)
     args = set_args_by_seed(args)
+    print("args", args)
     wandb.init(project="new_run_missing_labels", entity="noam-fluss", config=config)
 
     SSClusteringRunner(args).train()

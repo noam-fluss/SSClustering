@@ -19,6 +19,7 @@ from options import TRASNFORMS_ARGS, RESTORE_ARGS, OPTIMIZER_ARGS, MODEL_SPECIFI
 from functools import partial
 from torch.utils.data import DataLoader
 from scipy.optimize import linear_sum_assignment
+from os import path
 
 NUM_ROTATIONS = 4
 EXPERIMENTS_FOLDER = 'experiments'
@@ -44,10 +45,13 @@ class SemiSupervisedClustering:
         self.s_lowest_loss = np.inf
         self.cur_dir = ''
         ckpt = None
+
         if self.args.resume:
             ckpt = self.load_checkpoint()
             if ckpt:
                 self.restore_args(ckpt)
+                self.args.state = None
+
         self.create_dirs()
 
         self.log_file = open(os.path.join(self.log_dir, 'prints.txt'), "a")
@@ -57,7 +61,9 @@ class SemiSupervisedClustering:
             create_partially_labeled_dataset(name=self.args.dataset, root=self.args.data_dir,
                                              n_labels=self.args.n_labels, alpha=self.args.alpha,
                                              transductive=self.args.transductive, nat_std=self.args.nat_std,
-                                             seeds=self.data_seeds, **transform_args)
+                                             seeds=self.data_seeds, missing_labels=self.args.missing_labels,
+                                             n_classes=self.args.n_classes,
+                                             **transform_args)
         self.update_nat(ckpt)
         if self.args.debug:  # debug mode
             self.validation_set.data = self.validation_set.data[:100]
@@ -74,6 +80,10 @@ class SemiSupervisedClustering:
         self.num_classes = self.labeled_trainset.num_classes
         self.model, self.us_optim, self.s_optim = self.build_models(ckpt)
         self.s_scheduler, self.us_scheduler = self.get_schedulers()
+
+        if self.args.state is not None:
+            self.load_model_optim_scheduler()
+
         self.s_ema, self.us_ema = self.get_ema(ckpt)
 
         self.us_loss_fn = nn.MSELoss().to(self.device)
@@ -93,6 +103,25 @@ class SemiSupervisedClustering:
             self.model = nn.DataParallel(self.model)
 
         self.save_args()
+
+    def load_ss_clustering_members(self):
+        self.initial_iteration = self.args.state["ss_clustering_members"]["initial_iteration"]
+        self.data_seeds = self.args.state["ss_clustering_members"]["data_seeds"]
+        self.labels_permutation = self.args.state["ss_clustering_members"][
+            "labels_permutation"]  # for going from labels predicted by the model to normal labels.
+        self.best_classifying_acc = self.args.state["ss_clustering_members"]["best_classifying_acc"]
+        self.best_clustering_acc = self.args.state["ss_clustering_members"]["best_clustering_acc"]
+        self.us_lowest_loss = self.args.state["ss_clustering_members"]["us_lowest_loss"]
+        self.s_lowest_loss = self.args.state["ss_clustering_members"]["s_lowest_loss"]
+        self.cur_dir = self.args.state["ss_clustering_members"]["cur_dir"]
+
+    def load_model_optim_scheduler(self):
+        self.model.load_state_dict(self.args.state['model'])
+        self.model.to(self.device)
+        self.s_optim.load_state_dict(self.args.state['s_optim'])
+        self.us_optim.load_state_dict(self.args.state['us_optim'])
+        self.s_scheduler.load_state_dict(self.args.state['s_scheduler'])
+        self.us_scheduler.load_state_dict(self.args.state['us_scheduler'])
 
     def save_args(self):
         with open(self.cur_dir + '/args.txt', 'w') as outfile:
@@ -163,7 +192,6 @@ class SemiSupervisedClustering:
             return None
         else:
             print("=> loading checkpoint '{}'\n".format(self.args.resume))
-
         return torch.load(self.args.resume, map_location='cpu')
 
     def get_ema(self, ckpt):
@@ -296,9 +324,9 @@ class SemiSupervisedClustering:
         self.log_dir = os.path.join(self.cur_dir, self.args.log_dir)
         Path(self.log_dir).mkdir(parents=True, exist_ok=True)
 
-    def save_state(self, iteration, phase='s'):
-
-        self.log_file.write('saving best model\n')
+    def save_state(self, iteration, phase='s', save_best=True):
+        if save_best:
+            self.log_file.write('saving best model\n')
 
         us_ema_state_dict = None if self.us_ema is None else self.us_ema.ema.state_dict()
         s_ema_state_dict = None if self.s_ema is None else self.s_ema.ema.state_dict()
@@ -323,7 +351,11 @@ class SemiSupervisedClustering:
             'cta_rates': cta_rates
         }
         try:
-            torch.save(state, os.path.join(self.checkpoint_dir, 'ckpt-{}.pkl'.format(phase)))
+            if save_best:
+                torch.save(state, os.path.join(self.checkpoint_dir, 'ckpt-{}.pkl'.format(phase)))
+            else:
+
+                torch.save(state, os.path.join(self.checkpoint_dir, 'ckpt.pkl'))
         except:
             print('problem with saving')
 
@@ -442,7 +474,7 @@ class SemiSupervisedClustering:
     def prepare_us_iteration(self):
         pass
 
-    def eval_classifier(self, no_ema=False):
+    def eval_classifier(self, no_ema=False, missing_labels=None):
         '''
         evaluate the classifier on the validation set.
         :param no_ema: if True, use the raw model. Else, use the model EMA.
@@ -458,7 +490,22 @@ class SemiSupervisedClustering:
         validation_accuracy = np.mean(true_labels == pred_labels)
         if validation_accuracy > self.best_classifying_acc:
             self.best_classifying_acc = validation_accuracy
-        return validation_accuracy
+        if missing_labels is not None and len(missing_labels) > 0:
+            # TODO: check
+            missing_labels_pred_count_bool_list = np.logical_and(pred_labels <= max(missing_labels),
+                                                       pred_labels >= min(missing_labels))
+            missing_labels_pred_count = missing_labels_pred_count_bool_list.sum()
+            validation_accuracy_missing_lables = np.mean(np.logical_and(true_labels == pred_labels, np.logical_and(
+                true_labels <= max(missing_labels),
+                true_labels >= min(missing_labels))))  # TODO all values in missing labels
+            validation_accuracy_appearing_lables = np.mean(np.logical_and(true_labels == pred_labels,
+                                                                          np.logical_or(
+                                                                              true_labels > max(missing_labels),
+                                                                              true_labels < min(missing_labels))))
+
+            return validation_accuracy, validation_accuracy_missing_lables, validation_accuracy_appearing_lables, missing_labels_pred_count
+        else:
+            return validation_accuracy
 
     def eval_train(self):
         '''

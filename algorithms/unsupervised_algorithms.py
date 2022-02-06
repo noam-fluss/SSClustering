@@ -106,12 +106,17 @@ class DeepClustering(SemiSupervisedClustering):
         # the unit sphere) and all one-hot vectors.
         cost = euclidean_distances(output, real_targets)
         _, assignments, __ = lap.lapjv(cost, extend_cost=True)
-
+        #
+        # zero_choose = assignments[assignments == 0].index
+        # confident_choose = cose[zero_choose][cose[zero_choose] > threshold].index
         for i in range(len(new_targets)):
             if assignments[i] == -1:  # means that the image hasn't got a target.
                 new_targets[i] = np.zeros(self.num_classes)
             else:
                 new_targets[i] = real_targets[assignments[i]]
+                # if new_targets[i][0] == 1:
+                #     if self.args.
+                #
             no_real_target = np.logical_xor(np.any(new_targets[i]), np.any(targets[i]))  # whether either the old
             # target or new target are non-targets (zeros). Used to calculate the switches.
             target_switch = np.argmax(new_targets[i]) != np.argmax(targets[i])  # whether there was a cluster switch.

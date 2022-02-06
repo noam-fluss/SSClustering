@@ -18,7 +18,7 @@ cd $dir
 
 source /cs/labs/daphna/noam.fluss/python_env/env/bin/activate
 
-python3 train.py --dataset cifar10 --n_labels 40 --crop_size 32 --us_rotnet_epoch --milestones 100 --s_ema_eval\
+python3 run_file.py --dataset cifar10 --n_labels 40 --crop_size 32 --us_rotnet_epoch --milestones 100 --s_ema_eval\
         --rn test --data_seeds ${SLURM_ARRAY_TASK_ID}\
-        --iterations 50 --s_epochs 5 --slurm_task_id ${SLURM_JOB_ID}
+        --iterations 50 --s_epochs 5 --slurm_task_id ${SLURM_JOB_ID} --missing_labels 0
 
