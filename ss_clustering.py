@@ -71,6 +71,10 @@ class SemiSupervisedClustering:
             self.unlabeled_trainset.data = self.unlabeled_trainset.data[:1000]
             self.unlabeled_trainset.labels = self.unlabeled_trainset.labels[:1000]
             self.args.workers = 0
+
+        self.args.unlabeled_trainset_data, self.args.unlabeled_trainset_labels = self.unlabeled_trainset.build_data()
+        self.args.unlabeled_trainset_data = self.args.unlabeled_trainset_data.tolist()
+        self.args.unlabeled_trainset_labels = self.args.unlabeled_trainset_labels.tolist()
         self.val_loader = DataLoader(self.validation_set,
                                      batch_size=512,
                                      shuffle=False,
@@ -85,8 +89,11 @@ class SemiSupervisedClustering:
             self.load_model_optim_scheduler()
 
         self.s_ema, self.us_ema = self.get_ema(ckpt)
+        if int(self.args.us_missing_labels_loss_weight) == 1:
+            self.us_loss_fn = nn.MSELoss().to(self.device)
+        else:
+            self.us_loss_fn = weighted_mse_loss
 
-        self.us_loss_fn = nn.MSELoss().to(self.device)
         self.s_loss_fn = nn.CrossEntropyLoss().to(self.device)
 
         if self.args.estimate_perm and self.args.resume:
@@ -103,6 +110,7 @@ class SemiSupervisedClustering:
             self.model = nn.DataParallel(self.model)
 
         self.save_args()
+
 
     def load_ss_clustering_members(self):
         self.initial_iteration = self.args.state["ss_clustering_members"]["initial_iteration"]
@@ -124,9 +132,10 @@ class SemiSupervisedClustering:
         self.us_scheduler.load_state_dict(self.args.state['us_scheduler'])
 
     def save_args(self):
-        with open(self.cur_dir + '/args.txt', 'w') as outfile:
-            json.dump(self.args, outfile, indent=4)
-
+        # TODO fix it
+        #with open(self.cur_dir + '/args.txt', 'w') as outfile:
+        #    json.dump(self.args, outfile, indent=4)
+        pass
     def update_data_seeds(self):
         # data seeds can be one of the following:
         # 1. a model .pkl file path for loading partition we used in a different experiment.
@@ -596,3 +605,6 @@ class SemiSupervisedClustering:
             with open(os.path.join(self.args.save_pseudo, 'indices.json'), 'w') as outfile:
                 indices_dict = {'indexes': indices.tolist(), 'distribution': [1.0] * self.num_classes}
                 json.dump(indices_dict, outfile)
+
+def weighted_mse_loss(input, target, weight):
+    return torch.sum(weight * (input - target) ** 2)

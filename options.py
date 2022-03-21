@@ -32,8 +32,6 @@ class BasicParser:
     def __init__(self):
         self.parser = argparse.ArgumentParser()
 
-
-
     def parse(self):
         opts = self.parser.parse_args()
         args = vars(opts)
@@ -60,7 +58,7 @@ class TrainingOptions(BasicParser):
                                  help='path to a model which will create K pseudo labels from each class.')
         self.parser.add_argument('--rn', default='nat_test_run', type=str,
                                  help='run name')
-        self.parser.add_argument('--data_seeds', type=str,
+        self.parser.add_argument('--data_seeds', default="0", type=str,
                                  help='path to a saved model whose data seeds we are interested in')
         self.parser.add_argument('--save_pseudo', type=str,
                                  help='path to a folder for saving hard pseudo labels to use later on'
@@ -236,6 +234,10 @@ class TrainingOptions(BasicParser):
 
         self.parser.add_argument('--slurm_task_id', type=str, required=False, default=0)
         self.parser.add_argument('--n_classes', type=int, required=False, default=0)
+        self.parser.add_argument('--us_missing_labels_threshold', type=int, required=False, default=0)
+        self.parser.add_argument('--us_missing_labels_loss_weight', type=int, required=False, default=1)
+        self.parser.add_argument('--extra', type=str, required=False, default="")
+
 
 class EvaluationOptions(BasicParser):
     def __init__(self):

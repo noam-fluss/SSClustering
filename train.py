@@ -32,6 +32,7 @@ class SSClusteringRunner:
         self.state_checkpoint_run_path = os.path.join(str(self.args.saving_dir_killable), "run",
                                                       "task" + str(self.args.slurm_task_id),
                                                       self.args.data_seeds + ".pkl")
+
         print("self.state_checkpoint_run_path", self.state_checkpoint_run_path)
         if os.path.exists(self.state_checkpoint_run_path):
             self.args.state = torch.load(self.state_checkpoint_run_path)
@@ -40,7 +41,6 @@ class SSClusteringRunner:
         if self.args.lab_gpu is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = self.args.lab_gpu
         self.ss_clust = self.get_ss_clust()
-
         if self.args.teacher_path is not None:  # change the labeled trainset to be the teacher set + the
             # K most confident pseudo labels of the teacher from each class. Not really used anymore.
             labeled_images, pseudo_labels = self.pseudo_label()
@@ -99,9 +99,9 @@ class SSClusteringRunner:
                            'contrastive_fixmatch': ContrastiveFixMatch, 'mixmatch': MixMatch,
                            'uda': UDA, 'cta_uda': CTAUDA, 'remixmatch': ReMixMatch}
         us_algo_to_class = {'clustering': DeepClustering, 'us_fixmatch': USFixMatch, 'contrastive': USContrastive}
-
         class Dummy(s_algo_to_class[self.args.s_algo], us_algo_to_class[self.args.us_algo]):
             pass  # dummy class for inheritance
+        print("!!!")
 
         return Dummy(args=e_dict(vars(self.args)))
 

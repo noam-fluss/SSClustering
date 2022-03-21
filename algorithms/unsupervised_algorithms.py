@@ -39,8 +39,12 @@ class DeepClustering(SemiSupervisedClustering):
         count_sum_targets_missing_label = 0
         count_sum_new_targets_missing_label = 0
         current_targets_missing_label = 0
+        true_missing_labels_count = 0
+        confident_missing_labels_value_count = 0
+        true_other_labels_count = 0
         # Stream Training dataset with NAT
         for idx, images, label, nat in data_loader:
+
             if rotnet:
                 (x, augmented), rotnet_batch = images
                 rotnet_batch = torch.cat(rotnet_batch, dim=0).to(self.device)
@@ -57,15 +61,31 @@ class DeepClustering(SemiSupervisedClustering):
                 count_sum_targets_missing_label += current_targets_missing_label
             wandb.log({"unsupervised current targets missing label": current_targets_missing_label})
             augmented = torch.cat(augmented, dim=0).to(self.device)
-            cur_clustering_loss, batch_switches, batch_switches_from_missing, current_new_targets_missing_label = self.clustering_batch(
-                x=x, augmented=augmented, targets=targets, indices=idx)
+            cur_clustering_loss, batch_switches, batch_switches_from_missing, current_new_targets_missing_label, \
+                    confident_missing_labels_values, true_other_labels_count_current = \
+                            self.clustering_batch(x=x, augmented=augmented, targets=targets, indices=idx, label=label)
             count_sum_new_targets_missing_label += current_new_targets_missing_label
+            true_other_labels_count += true_other_labels_count_current
             num_switches += batch_switches
             num_switches_from_missing += batch_switches_from_missing
             clustering_loss += cur_clustering_loss
+            # TODO better coding
+            for index in range(len(confident_missing_labels_values)):
+                true_missing_labels_count += confident_missing_labels_values[index] in self.args.missing_labels
+            confident_missing_labels_value_count += len(confident_missing_labels_values)
+
         wandb.log({"unsupervised batch targets missing label": count_sum_targets_missing_label})
         wandb.log({"unsupervised batch new targets missing label": count_sum_new_targets_missing_label})
         wandb.log({"unsupervised batch switch from missing labels": num_switches_from_missing})
+        wandb.log({"unsupervised batch new targets missing label true labels count": true_missing_labels_count})
+        wandb.log({"unsupervised batch new targets other label true labels count": true_other_labels_count})
+        wandb.log({
+            "unsupervised batch new targets missing label confident labels count": confident_missing_labels_value_count})
+        if true_missing_labels_count == 0 and confident_missing_labels_value_count == 0:
+            confident_missing_labels_value_count = 1
+
+        wandb.log({"unsupervised batch new targets missing label true labels precision":
+                       true_missing_labels_count / confident_missing_labels_value_count})
 
         if self.us_scheduler is not None:
             self.us_scheduler.step()
@@ -87,10 +107,12 @@ class DeepClustering(SemiSupervisedClustering):
         wandb.log({"unsupervised batch nat missing label": unsupervised_batch_nat_missing_label})
         return rotnet_loss, rotnet_accuracy, us_stats
 
-    def clustering_batch(self, x, augmented, targets, indices):
+    def clustering_batch(self, x, augmented, targets, indices, label):
         n_switches = 0
+        true_other_labels_count = 0
         n_switches_from_missing = 0
         current_new_targets_missing_label = 0
+        confident_missing_labels_values = []
         with torch.no_grad():
             if self.args.us_ema_teacher:
                 output = F.normalize(self.us_ema.ema(x), dim=1, p=2)
@@ -107,6 +129,11 @@ class DeepClustering(SemiSupervisedClustering):
         cost = euclidean_distances(output, real_targets)
         _, assignments, __ = lap.lapjv(cost, extend_cost=True)
         #
+        assignments_cost = []
+        cost_true_labels = np.array([])
+        cost_true_missing_labels = np.array([])
+        cost_true_appearing_labels = np.array([])
+
         # zero_choose = assignments[assignments == 0].index
         # confident_choose = cose[zero_choose][cose[zero_choose] > threshold].index
         for i in range(len(new_targets)):
@@ -114,9 +141,7 @@ class DeepClustering(SemiSupervisedClustering):
                 new_targets[i] = np.zeros(self.num_classes)
             else:
                 new_targets[i] = real_targets[assignments[i]]
-                # if new_targets[i][0] == 1:
-                #     if self.args.
-                #
+                assignments_cost.append(cost[i][assignments[i]])
             no_real_target = np.logical_xor(np.any(new_targets[i]), np.any(targets[i]))  # whether either the old
             # target or new target are non-targets (zeros). Used to calculate the switches.
             target_switch = np.argmax(new_targets[i]) != np.argmax(targets[i])  # whether there was a cluster switch.
@@ -125,14 +150,31 @@ class DeepClustering(SemiSupervisedClustering):
                     targets[i]) in self.args.missing_labels):
                 n_switches_from_missing += 1
 
-        self.unlabeled_trainset.update_targets(indices, new_targets)  # update the assignment to targets.
-        if len(self.args.missing_labels) > 0:
-            current_new_targets_missing_label = new_targets[:, self.args.missing_labels[0]].sum()
-        wandb.log({"unsupervised new targets missing label": current_new_targets_missing_label})
+        for i in range(len(new_targets)):
+            if np.argwhere(new_targets[i] == 1)[0][0] in self.args.missing_labels:
+                if self.check_confident_missing(i, assignments, cost):
+                    # label is the true label - checked
+                    confident_missing_labels_values.append(label[i])
+            if label[i] in new_targets.argmax(axis=1):
+                cost_true_labels = np.append(cost_true_labels,
+                                             cost[i][np.argwhere(new_targets.argmax(axis=1) == label[i].item())[0][0]])
+                true_other_labels_count += len(cost_true_labels)
+                if label[i].item in self.args.missing_labels:
+                    cost_true_missing_labels = np.append(cost_true_missing_labels,
+                                                         cost[i][
+                                                             np.argwhere(new_targets.argmax(axis=1) == label[i].item())[
+                                                                 0][0]])
+                else:
+                    cost_true_appearing_labels = np.append(cost_true_appearing_labels,
+                                                           cost[i][
+                                                               np.argwhere(
+                                                                   new_targets.argmax(axis=1) == label[i].item())[0][
+                                                                   0]])
 
         one_hot_pseudo_labels = np.eye(self.num_classes)[np.argmax(output, axis=1)]
         confidence = np.linalg.norm(output - one_hot_pseudo_labels, axis=1)
-        new_augmented, y = [], []
+        new_augmented, y, missing_labels_weight = [], [], []
+
         for i in range(len(new_targets)):
             if np.sum(new_targets[i]) != 0:  # has target
                 t = new_targets[i]
@@ -140,14 +182,22 @@ class DeepClustering(SemiSupervisedClustering):
                 t = one_hot_pseudo_labels[i]
             else:  # the sample has no target and is not confident and hence is not processed.
                 continue
+            if np.argwhere(new_targets[i] == 1)[0][0] in self.args.missing_labels:
+                current_weight = self.args.us_missing_labels_loss_weight
+            else:
+                current_weight = 1
             for j in range(self.args.r):  # include the r repetitions of the processed images.
                 new_augmented.append(augmented[j * len(x) + i])
                 y.append(t)
+                missing_labels_weight.append(current_weight)
 
         new_augmented = torch.stack(new_augmented)
         output = F.normalize(self.model(new_augmented), dim=1, p=2)
         y = torch.tensor(y, dtype=torch.float, device=self.device)
-        loss = self.us_loss_fn(output, y)
+        if int(self.args.us_missing_labels_loss_weight) == 1:
+            loss = self.us_loss_fn(output, y)
+        else:
+            loss = self.us_loss_fn(output, y, missing_labels_weight)
         self.us_optim.zero_grad()
         loss.backward()
         self.us_optim.step()
@@ -155,7 +205,43 @@ class DeepClustering(SemiSupervisedClustering):
             self.us_ema.update_params()
 
         return loss.detach().item() * len(
-            augmented), n_switches, n_switches_from_missing, current_new_targets_missing_label
+            augmented), n_switches, n_switches_from_missing, current_new_targets_missing_label, confident_missing_labels_values, true_other_labels_count
+
+    def wandb_cost(self, cost, cost_true_labels, cost_true_missing_labels, cost_true_appearing_labels, assignments_cost,
+                   indices, new_targets):
+
+        wandb.log(
+            {"unsupervised reassignment min option cost - mean": np.sort(np.unique(cost, axis=1), axis=1)[:,
+                                                                 [0]].flatten().mean()})
+        wandb.log(
+            {"unsupervised reassignment min option cost - std": np.sort(np.unique(cost, axis=1), axis=1)[:,
+                                                                [0]].flatten().std()})
+        wandb.log(
+            {"unsupervised reassignment second min option cost - mean": np.sort(np.unique(cost, axis=1), axis=1)[:,
+                                                                        [0]].flatten().mean()})
+        wandb.log(
+            {"unsupervised reassignment second option cost - std": np.sort(np.unique(cost, axis=1), axis=1)[:,
+                                                                   [0]].flatten().std()})
+        wandb.log({"unsupervised all true labels reassignment cost - mean": cost_true_labels.mean()})
+        wandb.log({"unsupervised all true labels reassignment cost - std": cost_true_labels.std()})
+        if len(cost_true_missing_labels) > 0:
+            wandb.log({"unsupervised all true labels reassignment cost - mean": cost_true_missing_labels.mean()})
+            wandb.log({"unsupervised all true labels reassignment cost - std": cost_true_missing_labels.std()})
+        if len(cost_true_appearing_labels) > 0:
+            wandb.log({"unsupervised missing true labels reassignment cost - mean": cost_true_appearing_labels.mean()})
+            wandb.log({"unsupervised missing true labels reassignment cost - std": cost_true_appearing_labels.std()})
+        wandb.log({"unsupervised appearing labels hungarian assignment cost - mean": np.array(assignments_cost).mean()})
+        wandb.log({"unsupervised appearing labels hungarian assignment cost - std": np.array(assignments_cost).std()})
+        self.unlabeled_trainset.update_targets(indices, new_targets)  # update the assignment to targets.
+        if len(self.args.missing_labels) > 0:
+            current_new_targets_missing_label = new_targets[:, self.args.missing_labels[0]].sum()
+            wandb.log({"unsupervised new targets missing label": current_new_targets_missing_label})
+
+    def check_confident_missing(self, i, assignments, cost):
+        if cost[i][assignments[i]] <= np.sort(np.unique(cost, axis=1), axis=1)[:, [1]].flatten().mean():
+            return True
+        else:
+            return False
 
 
 class USFixMatch(SemiSupervisedClustering):
